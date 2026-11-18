@@ -11,11 +11,19 @@ from datetime import date
 from pathlib import Path
 
 import joblib
-import pandas as pd
+import pandas as pd  
 import sklearn
 from dotenv import load_dotenv
 from sklearn.pipeline import Pipeline
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
+from sklearn.model_selection import StratifiedKFold, TimeSeriesSplit, cross_validate
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.compose import make_column_selector
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 
 ROOT = Path(__file__).resolve().parent
 MODEL_DIR = ROOT / "model"
@@ -26,31 +34,90 @@ load_dotenv(ROOT / ".env")
 
 
 def load_data(engine) -> pd.DataFrame:
-    """
-    TODO 
-    """
-    raise NotImplementedError
+    query = text("""
+    SELECT
+        r.*,
+        h.code AS hotel
+    FROM reservations AS r
+    INNER JOIN hotels AS h
+        ON r.hotel_id = h.hotel_id
+    """)
 
+    df = pd.read_sql(query, engine)
+
+    # Convertir la date d'arrivée
+    df["arrival_date"] = pd.to_datetime(df["arrival_date"])
+
+    df.head()
+
+    return df
 
 def split_train_test(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    TODO
-    """
-    raise NotImplementedError
+    date_limite = df["arrival_date"].max() - pd.DateOffset(months=4)
+
+    # Entraînement sur les données passées
+    train = df[df["arrival_date"] <= date_limite].copy()
+
+    # Test sur les données les plus récentes
+    test = df[df["arrival_date"] > date_limite].copy()
+
+    return train, test
 
 
 def build_pipeline() -> Pipeline:
     """
-    TODO
+    Construit un pipeline de classification basé sur une forêt aléatoire.
+    Gère les valeurs manquantes et encode les variables catégorielles.
     """
-    raise NotImplementedError
+    # Prétraitement des variables catégorielles
+    categorical_pipeline = Pipeline(steps=[
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("encoder", OneHotEncoder(handle_unknown="ignore"))
+    ])
 
+    # Prétraitement des variables numériques
+    numerical_pipeline = Pipeline(steps=[
+        ("imputer", SimpleImputer(strategy="constant", fill_value=-1))
+    ])
+
+    # Combiner les prétraitements
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("categorical", categorical_pipeline,
+             make_column_selector(dtype_include=["object", "category"])),
+            ("numerical", numerical_pipeline,
+             make_column_selector(dtype_include=["number"]))
+        ]
+    )
+
+    # Pipeline complet
+    pipeline = Pipeline(steps=[
+        ("preprocessor", preprocessor),
+        ("classifier", RandomForestClassifier(
+            n_estimators=100,
+            random_state=42,
+            n_jobs=3
+        ))
+    ])
+
+    return pipeline
 
 def evaluate(model: Pipeline, X: pd.DataFrame, y: pd.Series) -> dict:
-    """
-    TODO 
-    """
-    raise NotImplementedError
+    """Calcule les métriques de classification sur les données fournies."""
+    y_pred = model.predict(X)
+
+    metrics = {
+        "accuracy": round(accuracy_score(y, y_pred), 4),
+        "precision": round(precision_score(y, y_pred, zero_division=0), 4),
+        "recall": round(recall_score(y, y_pred, zero_division=0), 4),
+        "f1": round(f1_score(y, y_pred, zero_division=0), 4),
+    }
+
+    if hasattr(model, "predict_proba"):
+        y_proba = model.predict_proba(X)[:, 1]
+        metrics["roc_auc"] = round(roc_auc_score(y, y_proba), 4)
+
+    return metrics
 
 
 def main() -> None:
